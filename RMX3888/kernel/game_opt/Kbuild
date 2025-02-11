@@ -1,0 +1,2 @@
+obj-$(CONFIG_OPLUS_FEATURE_GAME_OPT) += oplus_bsp_game_opt.o
+oplus_bsp_game_opt-y := game_ctrl.o cpu_load.o cpufreq_limits.o debug.o task_util.o rt_info.o early_detect.o fake_cpufreq.o

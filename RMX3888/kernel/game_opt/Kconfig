@@ -1,0 +1,4 @@
+config OPLUS_FEATURE_GAME_OPT
+  tristate "oplus bsp game opt"
+  help
+    oplus_bsp_game_opt
