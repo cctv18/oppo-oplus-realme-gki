@@ -206,6 +206,7 @@ jobs:
           sed -i '/\/oplus\/sensor\//d' ./common/drivers/soc/Kconfig
           rm -rf ./common/drivers/soc/oplus/sensor
           echo "已去除Oplus SMEM传感器驱动，避免编译出错"
+          
           #禁用 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
@@ -240,6 +241,17 @@ jobs:
           pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
           
           cd kernel_workspace/common
+          echo "正在执行编译前清理..."
+          find ./ -name "*.o" -delete
+          find ./ -name ".*.cmd" -delete
+          make ARCH=arm64 distclean >/dev/null 2>&1
+          if ! grep -qr "oplus/sensor" ./drivers/soc; then
+            echo "已彻底去除Oplus SMEM传感器驱动"
+          else
+            echo "警告：检测到残留引用，请手动检查以下文件："
+            grep -lr "oplus/sensor" ./drivers/soc
+            exit 1
+          fi
           #在构建内核的同时清除不必要的.NET, Android NDK, Haskell, CodeQL运行库，清理空间且不阻塞后续步骤运行
           sudo rm -rf /usr/share/dotnet &
           sudo rm -rf /usr/local/lib/android &
