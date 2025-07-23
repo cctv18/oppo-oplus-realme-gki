@@ -241,10 +241,6 @@ jobs:
           pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
           
           cd kernel_workspace/common
-          echo "正在执行编译缓存清理(1/2)..."
-          find -name "*.o" -delete
-          echo "正在执行编译缓存清理(2/2)..."
-          find -name ".*.cmd" -delete
           if ! grep -qr "oplus/sensor" ./drivers/soc; then
             echo "已彻底去除Oplus SMEM传感器驱动！"
           else
