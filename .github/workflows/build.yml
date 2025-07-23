@@ -200,7 +200,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          sed -i '/\/oplus\/sensor\//d' ./common/drivers/soc/Makefile || echo "去除oplus传感器相关驱动避免编译出错..."
+          sed -i '/\/oplus\/sensor\//d' ./common/drivers/soc/Makefile && echo "已去除oplus传感器相关驱动，避免编译出错"
           #禁用 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
