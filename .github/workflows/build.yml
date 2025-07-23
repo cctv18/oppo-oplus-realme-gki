@@ -200,11 +200,7 @@ jobs:
           echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          #一加特色配置
-          echo "CONFIG_QCOM_SMEM=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_OPLUS_FEATURE_BOOT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_OPLUS_FEATURE_OPROJECT=y" >> ./common/arch/arm64/configs/gki_defconfig
-          echo "CONFIG_OPLUS_SYSTEM_KERNEL_QCOM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          sed -i '/\/oplus\/sensor\//d' ./common/drivers/soc/Makefile || echo "去除oplus传感器相关驱动避免编译出错..."
           #禁用 defconfig 检查
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
