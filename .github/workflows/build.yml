@@ -1,69 +1,340 @@
-name: Kernel Build
+name: PixelOS 6.1.115 SM8650内核
+
+env:
+  TZ: Asia/Shanghai
+  CPU: 'sm8650'
+  FEIL: 'oppo+oplus+realme'
+  ANDROID_VERSION: 'android14'
+  KERNEL_VERSION: '6.1'
+  KERNEL_NAME: 'android14-11-o-gca13bffobf09'
+  KERNELSU_VARIANT: 'SukiSU-Ultra'
+  KERNELSU_BRANCH: 'susfs-main'
 
 on:
   workflow_dispatch:
+  # 取消此处注释代码可开启每日定时编译
+#  schedule:
+#    - cron: '0 23 * * *'  # UTC时间23点（北京时间次日7点）
+    inputs:
+      hook_method:
+        description: hook模式(大部分情况manual即可，少数需切换sus su模式的场景才需要kprobes钩子)
+        required: true
+        type: choice
+        default: 'manual'
+        options:
+          - 'manual'
+          - 'kprobes'
+      kpm_enable:
+        description: '是否开启kpm(可能轻微增加耗电，不需要可关闭)'
+        required: true
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+      kernel_suffix:
+        description: '内核后缀(留空默认,开头别加连字符)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
-    name: 初始化编译环境
     runs-on: ubuntu-latest
-    permissions: write-all
-
+    outputs:
+      ksuver: ${{ steps.ksu_version.outputs.ksuver }}
     steps:
-      - name: 检查服务器性能
+      - name: 安装配置环境依赖
         run: |
-          echo "--------------------------CPU信息--------------------------"
-          echo "CPU物理数量: $(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-          echo "CPU核心数量: $(nproc)"
-          echo -e "CPU型号信息:$(cat /proc/cpuinfo | grep -m1 name | awk -F: '{print $2}')\n"
-          echo "--------------------------内存信息--------------------------"
-          echo -e "$(sudo lshw -short -C memory | grep GiB)\n"
-          echo "--------------------------硬盘信息--------------------------"
-          echo "硬盘数量: $(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
-
-      - name: 安装依赖工具
+          sudo apt-mark hold firefox
+          sudo apt-mark hold libc-bin
+          sudo apt-mark hold man-db
+          sudo rm -rf /var/lib/man-db/auto-update
+          sudo apt update
+          sudo apt-get install -y --no-install-recommends \
+            curl bison flex make binutils git perl gcc python3 \
+            python-is-python3 bc libssl-dev libelf-dev \
+            bc aria2 zip unzip
+      
+      - name: 初始化源码仓库及llvm-Clang20工具链
         run: |
-          sudo curl https://storage.googleapis.com/git-repo-downloads/repo > /usr/local/bin/repo
-          sudo chmod +x /usr/local/bin/repo
-          sudo git config --global user.name "root"
-          sudo git config --global user.email "localhost"
-          sudo timedatectl set-timezone Asia/Shanghai
+          rm -rf kernel_workspace
+          mkdir kernel_workspace
+          cd kernel_workspace
+          echo "正在克隆源码仓库..."
+          aria2c -s16 -x16 -k1M https://github.com/PixelOS-Devices/kernel_oneplus_sm8650/archive/refs/heads/fifteen.zip -o common.zip
+          unzip -q common.zip
+          mv "kernel_oneplus_sm8650-fifteen" common
+          rm -rf common.zip
+          echo "正在克隆llvm-Clang20工具链..."
+          rm -rf clang20
+          mkdir -p clang20
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/clang-r547379.zip -o clang.zip
+          unzip -q clang.zip -d clang20
+          rm -rf clang.zip
+          echo "正在克隆构建工具..."
+          rm -rf build-tools
+          aria2c -s16 -x16 -k1M https://github.com/cctv18/oneplus_sm8650_toolchain/releases/download/LLVM-Clang20-r547379/build-tools.zip -o build-tools.zip
+          unzip -q build-tools.zip
+          rm -rf build-tools.zip
+          echo "正在去除 ABI 保护 & 去除 dirty 后缀..."
+          rm common/android/abi_gki_protected_exports_* || true
+          for f in common/scripts/setlocalversion; do
+            sed -i 's/ -dirty//g' "$f"
+            sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$f"
+          done
 
-      - name: 拉取本地仓库
-        uses: actions/checkout@v4
+      - name: 添加 SukiSU Ultra
+        id: ksu_version
+        run: |
+          # 进入内核工作目录
+          cd kernel_workspace
+          curl -LSs "https://raw.githubusercontent.com/ShirkNeko/SukiSU-Ultra/refs/heads/main/kernel/setup.sh" | bash -s susfs-main
+          cd ./KernelSU
+          export KSU_VERSION=$KSU_VERSION
+          # 尝试最多 3 次获取 KernelSU API 版本号
+          for i in {1..3}; do
+            # 从远程 Makefile 中提取 KSU_API_VERSION
+            KSU_API_VERSION=$(curl -s "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/susfs-main/kernel/Makefile" | 
+              # 查找第一个包含版本定义的行
+              grep -m1 "KSU_VERSION_API :=" | 
+              # 提取等号后的值
+              awk -F'= ' '{print $2}' | 
+              # 删除所有空白字符
+              tr -d '[:space:]')
+            # 如果成功获取到版本号则跳出循环，否则等待 1 秒后重试
+            [ -n "$KSU_API_VERSION" ] && break || sleep 1
+          done
+          # 如果获取失败，使用默认版本号 3.1.7
+          [ -z "$KSU_API_VERSION" ] && KSU_API_VERSION="3.1.7"
+          # 将 API 版本号存储到 GitHub 环境变量
+          echo "KSU_API_VERSION=$KSU_API_VERSION" >> $GITHUB_ENV
+          # 创建版本定义模板&版本格式函数
+          # KSU_VERSION_API: API 版本定义
+          # KSU_VERSION_FULL: 完整版本定义
+          VERSION_DEFINITIONS=$(cat << EOF
+          define get_ksu_version_full
+          v\\$1-SukiSU-cctv18
+          endef
+
+          KSU_VERSION_API := $KSU_API_VERSION
+          KSU_VERSION_FULL := v$KSU_API_VERSION-SukiSU-cctv18
+          EOF
+              )
+          # 清理内核 Makefile 中的旧版本定义
+          # 删除版本函数
+          sed -i '/define get_ksu_version_full/,/endef/d' kernel/Makefile
+          # 删除 API 版本定义
+          sed -i '/KSU_VERSION_API :=/d' kernel/Makefile
+          # 删除完整版本定义
+          sed -i '/KSU_VERSION_FULL :=/d' kernel/Makefile
+          # 在 REPO_OWNER 行后插入新版本定义
+          awk -v def="$VERSION_DEFINITIONS" '
+            # 当找到 REPO_OWNER 行时，插入版本定义并设置标记
+            /REPO_OWNER :=/ {print; print def; inserted=1; next}
+            # 打印所有行
+            1
+            # 如果未找到插入点，在文件末尾追加
+            END {if (!inserted) print def}
+          ' kernel/Makefile > kernel/Makefile.tmp && mv kernel/Makefile.tmp kernel/Makefile
+
+          # 生成自定义版本号（基于提交计数）, 失败时使用 114514
+          KSU_VERSION=$(expr $(git rev-list --count main) + 10700 2>/dev/null || echo 114514)
+          # 存储版本号到 GitHub 环境变量
+          echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
+          echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
+
+          # 验证修改结果
+          grep -A10 "REPO_OWNER" kernel/Makefile  # 检查插入点后的内容
+          grep "KSU_VERSION_FULL" kernel/Makefile # 确认版本定义存在
+
+
+      - name: 应用 SukiSU-Ultra & SUSFS 补丁
+        run: |
+          cd kernel_workspace
+          git clone https://github.com/ShirkNeko/susfs4ksu.git -b gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}
+          git clone https://github.com/ShirkNeko/SukiSU_patch.git
+          cp ./susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
+          cp ./susfs4ksu/kernel_patches/fs/* ./common/fs/
+          cp ./susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
+          cp ./SukiSU_patch/hooks/syscall_hooks.patch ./common/
+          cd ./common
+          patch -p1 < 50_add_susfs_in_gki-${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
+          patch -p1 < syscall_hooks.patch || true
+
+      - name: 应用 Hide Stuff 补丁
+        run: |
+          cd kernel_workspace/common
+          cp ../SukiSU_patch/69_hide_stuff.patch ./
+          patch -p1 < 69_hide_stuff.patch
+          
+      - name: 添加 SukiSU-Ultra & SUSFS 配置项
+        run: |
+          cd kernel_workspace
+          echo "CONFIG_KSU=y" >> ./common/arch/arm64/configs/gki_defconfig
+          if [ "${{ github.event.inputs.kpm_enable }}" == "true" ]; then
+            echo "CONFIG_KPM=y" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          if [ "${{ github.event.inputs.hook_method }}" == "kprobes" ]; then
+            echo "正在开启kprobes钩子..."
+            echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_MANUAL_HOOK=n" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_KPROBES_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+          else
+            echo "正在开启manual钩子..."
+            echo "CONFIG_KSU_MANUAL_HOOK=y" >> ./common/arch/arm64/configs/gki_defconfig
+            echo "CONFIG_KSU_SUSFS_SUS_SU=n" >> ./common/arch/arm64/configs/gki_defconfig
+          fi
+          echo "CONFIG_KSU_SUSFS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_KSU_DEFAULT_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_SUS_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SUS_KSTAT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          #echo "CONFIG_KSU_SUSFS_SUS_OVERLAYFS=n" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_TRY_UMOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_AUTO_ADD_TRY_UMOUNT_FOR_BIND_MOUNT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_UNAME=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_ENABLE_LOG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> ./common/arch/arm64/configs/gki_defconfig
+          echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> ./common/arch/arm64/configs/gki_defconfig
+          #禁用 defconfig 检查
+          sed -i 's/check_defconfig//' ./common/build.config.gki
+
+      - name: 添加制作名称
+        run: |
+          cd kernel_workspace
+          echo "替换内核版本后缀..."
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            echo "当前内核版本后缀：${{ github.event.inputs.kernel_suffix }}"
+            for f in ./common/scripts/setlocalversion; do
+              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ github.event.inputs.kernel_suffix }}\"|" "$f"
+            done
+          else
+            echo "当前内核版本后缀：${{ env.KERNEL_NAME }}"
+            for f in ./common/scripts/setlocalversion; do
+              sed -i "\$s|echo \"\\\$res\"|echo \"-${{ env.KERNEL_NAME }}\"|" "$f"
+            done
+          fi
+           
+      - name: 构建内核
+        run: |
+          WORKDIR="$(pwd)"
+          export PATH="/usr/lib/ccache:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/clang20/bin:$PATH"
+          export PATH="$WORKDIR/kernel_workspace/build-tools/bin:$PATH"
+          CLANG_DIR="$WORKDIR/kernel_workspace/clang20/bin"
+          CLANG_VERSION="$($CLANG_DIR/clang --version | head -n 1)"
+          LLD_VERSION="$($CLANG_DIR/ld.lld --version | head -n 1)"
+          echo "编译器信息:"
+          echo "Clang版本: $CLANG_VERSION"
+          echo "LLD版本: $LLD_VERSION"
+          pahole_version=$(pahole --version 2>/dev/null | head -n1); [ -z "$pahole_version" ] && echo "pahole版本：未安装" || echo "pahole版本：$pahole_version"
+          
+          cd kernel_workspace/common
+          #在构建内核的同时清除不必要的.NET, Android NDK, Haskell, CodeQL运行库，清理空间且不阻塞后续步骤运行
+          sudo rm -rf /usr/share/dotnet &
+          sudo rm -rf /usr/local/lib/android &
+          sudo rm -rf /opt/ghc &
+          sudo rm -rf /opt/hostedtoolcache/CodeQL &
+          make -j$(nproc --all) LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- CC="clang" LD=ld.lld HOSTLD=ld.lld O=out KCFLAGS+=-Wno-error gki_defconfig all
+          echo "内核编译完成！"
+          echo "编译后空间:"
+          df -h
+         
+      - name: 应用patch_linux并修补内核
+        if: ${{ github.event.inputs.kpm_enable == 'true' }}
+        run: |
+          cd kernel_workspace/common/out/arch/arm64/boot
+          curl -LO https://github.com/ShirkNeko/SukiSU_KernelPatch_patch/releases/download/0.12.0/patch_linux
+          chmod +x patch_linux
+          ./patch_linux
+          rm -f Image
+          mv oImage Image
+          
+      - name: 克隆 AnyKernel3 并打包
+        run: |
+          cd kernel_workspace
+          git clone https://github.com/cctv18/AnyKernel3 --depth=1
+          rm -rf ./AnyKernel3/.git
+          cd AnyKernel3
+          cp ../common/out/arch/arm64/boot/Image ./Image
+          if [ ! -f ./Image ]; then
+            echo "未找到内核镜像文件，构建可能出错"
+            exit 1
+          fi
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            zip -r ../AnyKernel3_SukiSU_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ github.event.inputs.kernel_suffix }}.zip ./*
+          else
+            zip -r ../AnyKernel3_SukiSU_${{ env.KSUVER }}_${{ env.KERNEL_VERSION }}_A15_${{ env.KERNEL_NAME }}.zip ./*
+          fi
+
+      - name: 上传 ZIP 工件
+        uses: actions/upload-artifact@v4
         with:
-          fetch-depth: 0
+          name: Kernel_ZIP_Artifacts
+          path: ${{ github.workspace }}/kernel_workspace/*.zip
 
-      - name: 同步内核源码
-        run: |
-          repo init --repo-rev=v2.16 --depth=1 -u https://android.googlesource.com/kernel/manifest -b common-android14-6.1-2025-01
-          repo sync -c --no-tags --no-clone-bundle
-
-      - name: 修改源码
-        run: |
-          rm common/android/abi_gki_protected_exports_*
-          sed -i '/if {/,/fi/d' build/kernel/kleaf/workspace_status_stamp.py
-          cp RMX3888/* -R common
-          cd common && git apply patch.diff
-
-      - name: 编译镜像
-        run: |
-          tools/bazel run --config=fast --config=stamp --lto=thin //common:kernel_aarch64_dist -- --dist_dir=out
-          echo "BUILD_TIME=$(date +'%Y-%m-%d-%H%M')" >> $GITHUB_ENV
-
-      - name: 上传到Release
-        uses: softprops/action-gh-release@v2
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+      actions: read
+      
+    steps:
+      - name: 下载 ZIP 工件
+        uses: actions/download-artifact@v4
         with:
-          tag_name: ${{ env.BUILD_TIME }}
+          name: Kernel_ZIP_Artifacts
+          path: ./release_zips
+
+      - name: 设置环境变量
+        run: |
+          if [[ -n "${{ github.event.inputs.kernel_suffix }}" ]]; then
+            FULL_VERSION=${{ format('{0}.115-{1}', env.KERNEL_VERSION, github.event.inputs.kernel_suffix) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+            export FULL_VERSION=$FULL_VERSION
+          else
+            FULL_VERSION=${{ format('{0}.115-{1}', env.KERNEL_VERSION, env.KERNEL_NAME) }}
+            echo "FULL_VERSION=$FULL_VERSION" >> $GITHUB_ENV
+            export FULL_VERSION=$FULL_VERSION
+          fi
+          TIME="$(TZ='Asia/Shanghai' date +'%y%m%d%H%M%S')"
+          TIME_FORM="$(TZ='Asia/Shanghai' date +'%Y-%m-%d %H:%M:%S')"
+          echo "TIME=$TIME" >> $GITHUB_ENV
+          echo "TIME_FORM=$TIME_FORM" >> $GITHUB_ENV
+          TAG_HEAD="PixelOS-A15-build"
+          echo "TAG_HEAD=$TAG_HEAD" >> $GITHUB_ENV
+         
+      - name: 创建发布
+        id: create_release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: "${{ env.TAG_HEAD }}-${{ env.TIME }}"
+          name: "${{ env.TAG_HEAD }}-${{ env.FULL_VERSION }}"
+          body: |
+            ### 📱 PixelOS Android 15 SukiSU-Ultra SM8650 通用内核 | 构建信息
+            - 内核版本号: ${{ env.FULL_VERSION }}
+            - 编译时间: ${{ env.TIME_FORM }}
+            - 型号：欧加真骁龙8Gen3 PixelOS 6.1.115 通用内核
+            - 特性：SukiSU Ultra + SUSFS + VFS + KPM
+            - hook模式：${{ github.event.inputs.hook_method }}
+            - 推荐系统：PixelOS
+            - SukiSU管理器下载：[SukiSU-Ultra](https://github.com/ShirkNeko/SukiSU-Ultra/releases)
+            ### ⏫️ 更新内容：
+            - 更新SukiSU Ultra至最新版本（${{ needs.build.outputs.ksuver }}）
+            - (预留)
+            ### 📋 安装方法 | Installation Guide
+            1. 若你的手机已经安装了第三方Recovery（如TWRP)，可下载对应机型的AnyKernel刷机包后进入Recovery模式，通过Recovery刷入刷机包后重启设备
+            2. 若你的手机之前已有 root 权限，可在手机上安装[HorizonKernelFlasher](https://github.com/libxzr/HorizonKernelFlasher/releases)，在HorizonKernelFlasher中刷入AnyKernel刷机包并重启
+            3. 若你之前已刷入SukiSU Ultra内核，且SukiSU Ultra管理器已更新至最新版本，可在SukiSU Ultra管理器中直接刷入AnyKernel刷机包并重启
+            4. 刷入无lz4kd补丁版的内核前若刷入过lz4kd补丁版的内核，为避免出错，请先关闭zram模块
+            #### ※※※刷写内核有风险，为防止出现意外导致手机变砖，在刷入内核前请务必用[KernelFlasher](https://github.com/capntrips/KernelFlasher)等软件备份boot等关键启动分区!※※※
+          draft: false
+          prerelease: false
           files: |
-            out/boot.img
-
-      - name: 清理旧文件
-        uses: ophub/delete-releases-workflows@main
-        with:
-          workflows_keep_day: 0
-          releases_keep_latest: 1
-          delete_tags: true
-          delete_workflows: true
-          delete_releases: true
-          gh_token: ${{ secrets.GITHUB_TOKEN }}
+            release_zips/AnyKernel3_*.zip
